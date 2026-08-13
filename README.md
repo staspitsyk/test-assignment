@@ -18,6 +18,114 @@ High-concurrency, stampede-resistant NestJS microservice integrating the [Docket
 
 ---
 
+## 📐 System Architecture & Request Execution Flow
+
+### 1. High-Level Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Controller as LegalResultsController
+    participant Service as LegalResultsService
+    participant Cache as ResultCacheService<br/>(async-cache-dedupe)
+    participant Redis as Redis Storage
+    participant Fanout as FanoutService
+    participant Planner as QueryPlanner
+    participant DAClient as DocketAlarmClient
+    participant LimiterPolicy as Bottleneck & Cockatiel
+    participant DA as DocketAlarm API
+
+    Client->>Controller: POST /api/v1/legal_results
+    Controller->>Controller: Zod Validation (RequestDto)
+    alt Invalid Input (422)
+        Controller-->>Client: HTTP 422 (invalid_entity)
+    end
+
+    Controller->>Service: processEntity(requestDto)
+    Service->>Cache: getLegalResults(normalizedEntity)
+    Cache->>Redis: Check Key: legal:results:<sha256>
+
+    alt Cache HIT (SWR active)
+        Redis-->>Cache: Return Cached JSON
+        Cache-->>Service: Return Cached Envelope (1ms)
+        Service-->>Controller: Return Response (meta.cache = "hit")
+        Controller-->>Client: HTTP 200 OK
+    else Cache MISS
+        Redis-->>Cache: Key Null / Stale
+        Cache->>Cache: Acquire Single-Flight Lock
+        Cache->>Fanout: run(normalizedEntity)
+
+        loop For Each Alias Candidate (concurrency: 3)
+            Fanout->>Planner: planAndSearch(candidate, entityType, address)
+
+            loop Query Narrowing Ladder Probing
+                Planner->>DAClient: search(ladderQuery, limit=1)
+                DAClient->>LimiterPolicy: execute(request)
+                LimiterPolicy->>DA: GET /api/v1.1/search/?q=...&limit=1
+                DA-->>LimiterPolicy: HTTP 200 { count: N }
+                LimiterPolicy-->>DAClient: Return SearchResponse
+                DAClient-->>Planner: Return Count (N)
+
+                alt Count <= 250
+                    Planner->>DAClient: Paginate Pages (limit=50, max 250)
+                    DAClient->>DA: GET /api/v1.1/search/?q=...&limit=50
+                    DA-->>DAClient: Page Results
+                    DAClient-->>Planner: Raw Results Array
+                    Planner-->>Fanout: Yield Up to 250 Results
+                else Count > 250 AND More Steps
+                    Planner->>Planner: Advance to Next Ladder Step (i++)
+                else Count > 250 AND Ladder Exhausted
+                    Planner->>DAClient: Paginate Narrowest Query to 250
+                    DAClient-->>Planner: Raw Results Array (partial)
+                    Planner-->>Fanout: Yield Truncated 250 Results (meta.partial = true)
+                end
+            end
+        end
+
+        Fanout->>Fanout: Merge All Candidate Yields
+        Fanout->>Fanout: Deduplicate by (court, docket)
+        Fanout->>Fanout: Classify Court Authority & Sort (Federal > State > County > Uncategorized)
+        Fanout->>Fanout: Truncate Merged Union to 250 Cap
+        Fanout-->>Cache: Return Final LegalResult[]
+
+        Cache->>Redis: SET legal:results:<sha256> (TTL 30m / 60s)
+        Cache-->>Service: Return LegalResultsResponse
+        Service-->>Controller: Return Response (meta.cache = "miss")
+        Controller-->>Client: HTTP 200 OK
+    end
+```
+
+### 2. Query Planner Narrowing Ladder & Probing Flow
+
+```mermaid
+flowchart TD
+    Start["Incoming Search Request"] --> SelectLadder{"Entity Type?"}
+
+    SelectLadder -- Person --> PersonLadder["PERSON_LADDER:<br/>1. party:(name:'First Last') AND is:docket<br/>2. + court:(<State Courts>) AND is:state<br/>3. + from:-10years"]
+    SelectLadder -- Company --> CompanyLadder["COMPANY_LADDER:<br/>1. party:(name:'CompanyName') AND is:docket<br/>2. party:(name:'CompanyName Type') AND is:docket<br/>3. + from:-10years"]
+
+    PersonLadder --> Step0["Set Step i = 0"]
+    CompanyLadder --> Step0
+
+    Step0 --> BuildQuery["Build Query string for steps [0..i]"]
+    BuildQuery --> ProbeCall["Probe Upstream: search(query, limit=1)"]
+    ProbeCall --> CheckCount{"Count <= 250?"}
+
+    CheckCount -- YES --> Paginate["Paginate Query up to Count<br/>(Max 5 pages x 50 items = 250 max)"]
+    Paginate --> FormattedResults["Return Results Envelope<br/>(meta.truncated = false)"]
+
+    CheckCount -- NO --> CheckLadder{"More Ladder Steps Available?"}
+
+    CheckLadder -- YES --> AdvanceStep["Advance Step: i = i + 1"]
+    AdvanceStep --> BuildQuery
+
+    CheckLadder -- NO --> Exhausted["Ladder Exhausted!<br/>Paginate narrowest query up to 250 max"]
+    Exhausted --> TruncatedResults["Return Results Envelope<br/>(meta.truncated = true, meta.partial = true, meta.unnarrowable = true)"]
+```
+
+---
+
 ## 🛠️ Tech Stack
 
 | Domain | Technology |
@@ -157,7 +265,7 @@ Returned when request input violates entity rules (e.g. single-token person name
 Exposes custom application and system metrics for scraping:
 
 ```bash
-curl -s http://localhost:3001/metrics | grep -E '^(upstream_|cache_|circuit_|token_|dedup_)'
+curl -s http://localhost:3001/metrics | grep -E '(upstream_|cache_|circuit_|token_|dedup_)'
 ```
 
 Key Metrics Exposed:
