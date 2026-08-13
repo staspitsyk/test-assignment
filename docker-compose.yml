@@ -1,13 +1,9 @@
-version: '3.8'
-
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
     image: legal-results-service:latest
-    ports:
-      - "3000:3000"
     env_file:
       - .env
     environment:

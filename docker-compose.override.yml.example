@@ -1,10 +1,8 @@
-version: '3.8'
-
 services:
   app:
     ports:
-      - "3000:3000" # Change host port if 3000 is in use, e.g. "3001:3000"
+      - "3001-3002:3000" # Maps app replica 1 to host port 3001 and replica 2 to host port 3002
 
   redis:
     ports:
-      - "6380:6379" # Exposed on host port 6380 to avoid collision with local Redis on 6379
+      - "6380:6379" # Maps host port 6380 to container port 6379 (prevents conflict with host Redis on 6379)

@@ -157,7 +157,7 @@ Returned when request input violates entity rules (e.g. single-token person name
 Exposes custom application and system metrics for scraping:
 
 ```bash
-curl -s http://localhost:3000/metrics | grep -E '^(upstream_|cache_|circuit_|token_|dedup_)'
+curl -s http://localhost:3001/metrics | grep -E '^(upstream_|cache_|circuit_|token_|dedup_)'
 ```
 
 Key Metrics Exposed:
