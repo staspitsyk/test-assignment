@@ -1,3 +1,6 @@
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import { runConcurrentTokensProbe } from './concurrent-tokens.probe';
 import { runRateLimitProbe } from './rate-limit.probe';
 import { runErrorTaxonomyProbe } from './error-taxonomy.probe';
