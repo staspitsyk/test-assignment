@@ -77,6 +77,7 @@ export class MetricsService implements OnModuleInit {
 
   public onModuleInit(): void {
     collectDefaultMetrics({ register: this.registry });
+    this.circuitStateGauge.set({ name: 'docket_alarm' }, 0);
   }
 
   public async getMetrics(): Promise<string> {
