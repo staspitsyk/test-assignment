@@ -1,7 +1,7 @@
-import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
+import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from './app.module';
 import { APP_CONFIG, AppConfig } from './config/config.token';
 import { bootstrapOtel } from './shared/observability/otel';
@@ -18,26 +18,66 @@ async function bootstrap(): Promise<void> {
   app.useLogger(logger);
   app.use(helmet());
 
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: false,
-      transform: true,
-    }),
-  );
+  app.useGlobalPipes(new ZodValidationPipe());
 
   const readinessState = app.get(ReadinessStateService);
 
-  app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
+  app.enableShutdownHooks();
 
-  process.on('SIGTERM', () => {
-    logger.log({ event: 'sigterm_received', message: 'Flipping readiness to false' });
+  let isShuttingDown = false;
+  const handleShutdown = async (signal: string): Promise<void> => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    logger.log({
+      event: 'shutdown_initiated',
+      signal,
+      message: 'Flipping readiness state to false (HTTP 503)',
+    });
     readinessState.setReady(false);
+
+    logger.log({
+      event: 'shutdown_lb_propagation_wait',
+      seconds: 5,
+      message: 'Waiting 5s for load balancer propagation window',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    logger.log({
+      event: 'shutdown_draining',
+      message: 'Closing HTTP server and draining in-flight requests (max 25s)',
+    });
+
+    const closeAppPromise = app.close();
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error('Shutdown drain timeout of 25s reached')),
+        25_000,
+      ),
+    );
+
+    try {
+      await Promise.race([closeAppPromise, timeoutPromise]);
+      logger.log({
+        event: 'shutdown_clean_exit',
+        message: 'Application gracefully shut down cleanly',
+      });
+      process.exit(0);
+    } catch (err) {
+      logger.error({
+        event: 'shutdown_error',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      process.exit(1);
+    }
+  };
+
+  process.once('SIGTERM', () => {
+    void handleShutdown('SIGTERM');
   });
 
-  process.on('SIGINT', () => {
-    logger.log({ event: 'sigint_received', message: 'Flipping readiness to false' });
-    readinessState.setReady(false);
+  process.once('SIGINT', () => {
+    void handleShutdown('SIGINT');
   });
 
   await app.listen(config.PORT);

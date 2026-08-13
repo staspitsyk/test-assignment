@@ -1,4 +1,4 @@
-import { Body, Controller, Headers, Inject, Post } from '@nestjs/common';
+import { Body, Controller, Headers, HttpCode, HttpStatus, Inject, Post } from '@nestjs/common';
 import { ClsService } from 'nestjs-cls';
 import { APP_CONFIG, AppConfig } from '../config/config.token';
 import { LegalResultsRequestDto } from './dto/request.dto';
@@ -14,6 +14,7 @@ export class LegalResultsController {
   ) {}
 
   @Post()
+  @HttpCode(HttpStatus.OK)
   public async getLegalResults(
     @Body() body: LegalResultsRequestDto,
     @Headers('x-cache-bypass') cacheBypassHeader?: string,

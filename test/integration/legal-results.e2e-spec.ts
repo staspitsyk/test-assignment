@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
+import { ZodValidationPipe } from 'nestjs-zod';
 import * as request from 'supertest';
 import { MockAgent } from 'undici';
 import * as fs from 'fs';
@@ -58,13 +59,7 @@ describe('Legal Results API E2E (POST /api/v1/legal_results)', () => {
       .compile();
 
     app = moduleRef.createNestApplication();
-    app.useGlobalPipes(
-      new ValidationPipe({
-        whitelist: true,
-        forbidNonWhitelisted: false,
-        transform: true,
-      }),
-    );
+    app.useGlobalPipes(new ZodValidationPipe());
     await app.init();
   });
 
@@ -113,19 +108,28 @@ describe('Legal Results API E2E (POST /api/v1/legal_results)', () => {
 
   describe('Caching & Bypass behavior', () => {
     it('should return cache hit on subsequent identical request', async () => {
-      const filePath = path.join(fixturesDir, 'westlake.json');
-      const fixtureData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const payload = {
+        entityId: 99999,
+        entityType: 'Company',
+        sender: 'E2E-TEST',
+        entityDetails: {
+          name: [{ full: 'Acme Testing Corp', confidence: 1.0, type: 'LLC' }],
+          address: [],
+        },
+      };
 
       // First call -> cache miss
       const res1 = await request(app.getHttpServer())
         .post('/api/v1/legal_results')
-        .send(fixtureData)
+        .send(payload)
         .expect(200);
+
+      expect(res1.body.meta.cache).toBe('miss');
 
       // Second call -> cache hit
       const res2 = await request(app.getHttpServer())
         .post('/api/v1/legal_results')
-        .send(fixtureData)
+        .send(payload)
         .expect(200);
 
       expect(res2.body.meta.cache).toBe('hit');

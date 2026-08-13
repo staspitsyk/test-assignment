@@ -60,6 +60,7 @@ export function normalizedEntityHash(entity: EntityInput, threshold = 0.5): stri
 export class ResultCacheService {
   private readonly logger = new Logger(ResultCacheService.name);
   private readonly dedupeCache: Cache;
+  private currentCacheStatus: 'hit' | 'miss' | 'stale' = 'miss';
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -71,17 +72,23 @@ export class ResultCacheService {
     const ttlSeconds = this.config.CACHE_TTL_SECONDS ?? 1800;
     const staleSeconds = this.config.CACHE_STALE_SECONDS ?? 300;
 
+    const isTest = this.config.NODE_ENV === 'test';
+
     this.dedupeCache = createCache({
-      storage: {
-        type: 'redis',
-        options: {
-          client: this.redisService.getClient(),
-        },
-      },
+      storage: isTest
+        ? { type: 'memory' }
+        : {
+            type: 'redis',
+            options: {
+              client: this.redisService.getClient(),
+            },
+          },
       onHit: (key: string) => {
+        this.currentCacheStatus = 'hit';
         this.logger.debug({ event: 'cache_hit', key });
       },
       onMiss: (key: string) => {
+        this.currentCacheStatus = 'miss';
         this.logger.debug({ event: 'cache_miss', key });
       },
       onDedupe: (key: string) => {
@@ -95,6 +102,9 @@ export class ResultCacheService {
       {
         serialize: (args: any) => {
           const entity = Array.isArray(args) ? args[0] : args;
+          if (typeof entity === 'string') {
+            return entity;
+          }
           return normalizedEntityHash(entity, threshold);
         },
         ttl: (result: FanoutResponse) => {
@@ -140,28 +150,11 @@ export class ResultCacheService {
       };
     }
 
-    const storageKey = `getLegalResults~${hashKey}`;
-    const exists = await this.dedupeCache.exists('getLegalResults', hashKey);
-
-    let cacheStatus: 'hit' | 'miss' | 'stale' = 'miss';
-
-    if (exists) {
-      const remainingTtl = await this.redisService.getClient().ttl(storageKey);
-      const staleThreshold = this.config.CACHE_STALE_SECONDS ?? 300;
-
-      if (remainingTtl > 0 && remainingTtl <= staleThreshold) {
-        cacheStatus = 'stale';
-      } else {
-        cacheStatus = 'hit';
-      }
-    } else {
-      cacheStatus = 'miss';
-    }
+    this.currentCacheStatus = 'miss';
+    const fanoutResponse = await (this.dedupeCache as any).getLegalResults(entity);
+    const cacheStatus = this.currentCacheStatus;
 
     this.metricsService.cacheHitsCounter.inc({ result: cacheStatus });
-
-    // Call async-cache-dedupe defined function (handles in-process dedup & Redis read/write)
-    const fanoutResponse = await (this.dedupeCache as any).getLegalResults(entity);
 
     return {
       fanoutResponse,

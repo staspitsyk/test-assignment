@@ -13,6 +13,8 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "test": "jest",
+    "test:e2e": "jest --testRegex \".*\\\\.e2e-spec\\\\.ts$\"",
+    "probes": "ts-node -r tsconfig-paths/register test/probes/run-probes.ts",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand"
@@ -60,7 +62,7 @@
       "ts"
     ],
     "rootDir": ".",
-    "testRegex": ".*\\.(spec|integration-spec)\\.ts$",
+    "testRegex": ".*\\.(spec|integration-spec|e2e-spec)\\.ts$",
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },

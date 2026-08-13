@@ -28,6 +28,10 @@ export class HealthController {
     private readonly readinessState: ReadinessStateService,
   ) {}
 
+  public setReady(isReady: boolean): void {
+    this.readinessState.setReady(isReady);
+  }
+
   @Get('live')
   @HealthCheck()
   public async checkLiveness(): Promise<HealthCheckResult> {
