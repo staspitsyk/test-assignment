@@ -13,8 +13,10 @@ High-concurrency, stampede-resistant NestJS microservice integrating the [Docket
 - **Shared Token Election**: 90-minute DocketAlarm tokens cached in Redis using `SET NX PX` election lock and `da:token:new` PubSub notification for seamless token rotation.
 - **Court Classifier & Authority Sorting**: Deterministic court tier classification (`FEDERAL > STATE > COUNTY > UNCATEGORIZED`) with specialty court override rules (`'United States Tax Court'`).
 - **State Abbreviation Bypass**: Sidesteps DocketAlarm's expansion traps (e.g. `NY`, `IN`, `OR`) using explicit full court name mappings.
-- **Full Observability Triad**: Structured Pino logging + `nestjs-cls` AsyncLocalStorage correlation IDs (`X-Request-Id`), Prometheus metrics endpoint (`GET /metrics`), and OpenTelemetry tracing shell.
-- **Zero-Downtime Graceful Shutdown**: Intercepts SIGTERM/SIGINT signals to flip readiness (`/health/ready` -> 503), wait 5s for load balancer propagation, stop accepting connections, drain in-flight requests up to 25s, and cleanly close Redis/Bottleneck connections.
+- **Full Observability Triad**: Structured Pino logging + `nestjs-cls` AsyncLocalStorage correlation IDs (`X-Request-Id`), Prometheus metrics endpoint (`GET /metrics`) with 8 custom series (upstream latency & status, cache hit/miss, circuit state, dedup wins, token refresh election outcomes, narrowing steps, alias fan-out size), and OpenTelemetry SDK with auto-instrumentation for `undici`/`ioredis`/`pino`/`http` (activates when `OTEL_EXPORTER_OTLP_ENDPOINT` is set — otherwise a no-op).
+- **Per-Request Upstream Budget**: Hard 30-call ceiling per incoming request, cooperatively spent across every alias/step/page. Prevents one pathological input from monopolizing the shared rate-limiter reservoir; short-circuits with `partial: true, unnarrowable: true` when hit.
+- **Horizontal Scale, No Node Clusters**: Every shared piece of state (result cache, single-flight lock, DA token, Bottleneck reservoir, circuit signal via retryable outcomes) lives in Redis. Scale is one Node process per container × N containers via the orchestrator (`--scale app=N`), never Node's `cluster` module — see the plan file for the reasoning.
+- **Zero-Downtime Graceful Shutdown**: Intercepts SIGTERM/SIGINT signals to flip readiness (`/health/ready` -> 503), wait 5s for load balancer propagation, stop accepting connections, drain in-flight requests up to 25s, and cleanly close Redis/Bottleneck/undici Agent/OTel SDK.
 
 ---
 
@@ -161,7 +163,16 @@ DA_PASSWORD="your_docketalarm_password"
 ```
 
 ### 2. Launch the Application Stack
-Start 2 application replicas and Redis 7 in detached mode:
+
+Docker Compose respects `deploy.replicas` only when combined with `--scale`; plain `docker compose up` launches a single instance. To run 2 replicas (the design's stampede-and-token-election test target), use:
+
+```bash
+docker compose up --build --scale app=2 -d
+```
+
+`docker-compose.override.yml` maps replica 1 to host port **3001** and replica 2 to host port **3002** (Redis is exposed on host **6380** to avoid clashing with a local Redis on 6379).
+
+For a single-instance quick run:
 
 ```bash
 docker compose up --build -d
@@ -169,11 +180,13 @@ docker compose up --build -d
 
 ### 3. Verify Health Endpoints
 ```bash
-# Liveness check (process alive)
-curl -sf http://localhost:3000/health/live
+# Liveness (process alive, event loop responsive)
+curl -sf http://localhost:3001/health/live
+curl -sf http://localhost:3002/health/live
 
-# Readiness check (Redis connected, token ready, circuit closed)
-curl -sf http://localhost:3000/health/ready
+# Readiness (Redis reachable — flips to 503 during SIGTERM drain)
+curl -sf http://localhost:3001/health/ready
+curl -sf http://localhost:3002/health/ready
 ```
 
 ---
@@ -220,6 +233,8 @@ Content-Type: application/json
 ```
 
 #### Success Response Envelope (HTTP 200)
+`dateFiled` is passed through in DocketAlarm's native `mm/dd/yyyy` format (or `null` when missing/unparseable — those results sort last).
+
 ```json
 {
   "results": [
@@ -228,7 +243,7 @@ Content-Type: application/json
       "docket": "8:23-cv-01234",
       "title": "Friedman v. Acme Corp",
       "link": "https://www.docketalarm.com/cases/...",
-      "dateFiled": "2024-01-15T00:00:00.000Z",
+      "dateFiled": "01/15/2024",
       "courtTier": "FEDERAL"
     }
   ],
@@ -247,13 +262,37 @@ Content-Type: application/json
 }
 ```
 
-#### Rejection Responses (HTTP 422 `invalid_entity`)
-Returned when request input violates entity rules (e.g. single-token person name, empty company name, or all candidates below `ALIAS_CONFIDENCE_THRESHOLD` 0.5):
+#### Unnarrowable Response (HTTP 200 with `partial: true`)
+When the entity is so broad the ladder cannot get under 250 (e.g. `GOLDMAN SACHS` — 162k+ upstream matches), the service returns the narrowest set (≤ 250 rows after dedup) and flags the outcome. Product decides UX; never a hard failure.
+
+```json
+{
+  "meta": {
+    "entityId": 88,
+    "entityType": "Company",
+    "count": 233,
+    "upstream_count": 162754,
+    "truncated": true,
+    "partial": true,
+    "unnarrowable": true,
+    "cache": "miss",
+    "requestId": "req-…",
+    "elapsedMs": 7931
+  }
+}
+```
+
+#### Rejection Responses
+Two distinct error paths:
+
+- **HTTP 400 `bad_request`** — DTO shape violates the zod schema (missing `entityType`, non-numeric `entityId`, malformed `entityDetails`, etc.). Caught at the pipe layer.
+- **HTTP 422 `invalid_entity`** — DTO valid but the domain rules reject it: empty `name[]`, all candidates below `ALIAS_CONFIDENCE_THRESHOLD` (default `0.5`), Person top-confidence name has no last name, Company top-confidence name is empty after trim.
+
 ```json
 {
   "error": {
     "code": "invalid_entity",
-    "message": "Person entity name must contain both first and last name",
+    "message": "No name candidate meets the minimum confidence threshold",
     "requestId": "req-12345"
   }
 }
@@ -262,18 +301,38 @@ Returned when request input violates entity rules (e.g. single-token person name
 ---
 
 ### 2. Prometheus Metrics (`GET /metrics`)
-Exposes custom application and system metrics for scraping:
+Exposes custom application and process metrics for scraping:
 
 ```bash
-curl -s http://localhost:3001/metrics | grep -E '(upstream_|cache_|circuit_|token_|dedup_)'
+curl -s http://localhost:3001/metrics | grep -E '(upstream_|cache_|circuit_|token_|dedup_|narrowing_|alias_fanout_)'
 ```
 
-Key Metrics Exposed:
-- `upstream_duration_seconds`: Histogram of DocketAlarm call durations.
-- `upstream_status_total`: Counter of DocketAlarm responses by HTTP status code.
-- `cache_hits_total`: Cache result counters (`hit`, `miss`, `stale`, `bypass`).
-- `circuit_state`: Circuit breaker status gauge (`0`=Closed, `1`=HalfOpen, `2`=Open).
-- `dedup_wins_total`: Counter of coalesced stampede wins (`in_process`, `cross_pod`).
+Custom metrics:
+
+| Metric | Type | Labels | Fires from |
+|---|---|---|---|
+| `upstream_duration_seconds` | histogram | `endpoint`, `status` | DocketAlarm client, per request |
+| `upstream_status_total` | counter | `endpoint`, `status` | DocketAlarm client, per request |
+| `cache_hits_total` | counter | `result` (`hit`/`miss`/`stale`/`bypass`) | ResultCacheService |
+| `circuit_state` | gauge | `name` (`docket_alarm`) | cockatiel `onBreak`/`onReset`/`onHalfOpen` (`0`=closed, `1`=half, `2`=open) |
+| `dedup_wins_total` | counter | `scope` (`in_process`) | `async-cache-dedupe` `onDedupe` |
+| `token_refresh_total` | counter | `result` (`won_lock`/`waited`/`failed`) | TokenService election |
+| `narrowing_steps_bucket` | counter | `ladder_step` (`party`/`state`/`name`/`type`/`10years`) | QueryPlanner per probe |
+| `alias_fanout_size` | histogram | (none — buckets 1/2/3/5/10) | FanoutService per request |
+
+### 3. Environment Variables
+
+See [`.env.example`](.env.example) for the full annotated list. Highlights:
+
+| Var | Purpose | Default |
+|---|---|---|
+| `DA_USERNAME` / `DA_PASSWORD` | DocketAlarm credentials (never logged; masked in pino redact list) | — |
+| `DA_TEST_MODE` | When `true`, appends `test=1` to every DA call so no requests are billed. Auto-true when `NODE_ENV=test`. | `false` |
+| `REDIS_URL` | Shared state (validated as `redis://` or `rediss://`) | `redis://localhost:6379` |
+| `CACHE_TTL_SECONDS` / `CACHE_STALE_SECONDS` | SWR window; stale must be `<=` ttl (zod-enforced) | `1800` / `300` |
+| `ALIAS_CONFIDENCE_THRESHOLD` | Candidates below this are dropped from single-name and fan-out paths | `0.5` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTel OTLP-HTTP collector URL. Leave unset to disable OTel entirely. | — |
+| `LOG_LEVEL` | pino level | `info` |
 
 ---
 
