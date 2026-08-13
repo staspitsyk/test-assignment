@@ -1,0 +1,27 @@
+{
+  "entityId": 99,
+  "entityType": "Person",
+  "sender": "INTELLIGO",
+  "entityDetails": {
+    "name": [
+      {
+        "full": "Christopher Brien",
+        "confidence": 1.0
+      },
+      {
+        "full": "Chris Brien",
+        "confidence": 0.7
+      },
+      {
+        "full": "Christopher Obrien",
+        "confidence": 0.2
+      }
+    ],
+    "address": [
+      {
+        "full": "5th Avenue, New York, NY 10001",
+        "confidence": 0.9
+      }
+    ]
+  }
+}

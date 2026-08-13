@@ -1,0 +1,15 @@
+{
+  "entityId": 55,
+  "entityType": "Company",
+  "sender": "INTELLIGO",
+  "entityDetails": {
+    "name": [
+      {
+        "full": "Westlake Services",
+        "confidence": 1.0,
+        "type": "LLC"
+      }
+    ],
+    "address": []
+  }
+}

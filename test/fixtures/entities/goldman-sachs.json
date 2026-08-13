@@ -1,0 +1,15 @@
+{
+  "entityId": 88,
+  "entityType": "Company",
+  "sender": "INTELLIGO",
+  "entityDetails": {
+    "name": [
+      {
+        "full": "GOLDMAN SACHS",
+        "confidence": 1.0,
+        "type": "LLC"
+      }
+    ],
+    "address": []
+  }
+}

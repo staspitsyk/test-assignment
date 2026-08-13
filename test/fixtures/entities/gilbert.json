@@ -1,0 +1,35 @@
+{
+  "entityId": 23,
+  "entityType": "Person",
+  "sender": "INTELLIGO",
+  "entityDetails": {
+    "name": [
+      {
+        "full": "Robert Gilbert",
+        "confidence": 1.0
+      },
+      {
+        "full": "Rob T Gil",
+        "confidence": 0.1
+      }
+    ],
+    "address": [
+      {
+        "full": "100 Main St, Boise, ID 83702",
+        "confidence": 0.9
+      },
+      {
+        "full": "200 South Temple, Salt Lake City, UT 84101",
+        "confidence": 0.95
+      },
+      {
+        "full": "300 Broadway, St. Louis, MO 63102",
+        "confidence": 0.85
+      },
+      {
+        "full": "400 N Central Ave, Phoenix, AZ 85004",
+        "confidence": 0.88
+      }
+    ]
+  }
+}

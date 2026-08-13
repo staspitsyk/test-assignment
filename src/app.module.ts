@@ -8,6 +8,7 @@ import { HealthModule } from './shared/health/health.module';
 import { MetricsModule } from './shared/observability/metrics.module';
 import { AllExceptionsFilter } from './shared/errors/all-exceptions.filter';
 import { DocketAlarmModule } from './docket-alarm/docket-alarm.module';
+import { LegalResultsModule } from './legal-results/legal-results.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { DocketAlarmModule } from './docket-alarm/docket-alarm.module';
     HealthModule,
     MetricsModule,
     DocketAlarmModule,
+    LegalResultsModule,
   ],
   providers: [
     {

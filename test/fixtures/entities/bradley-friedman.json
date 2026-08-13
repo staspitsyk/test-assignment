@@ -1,0 +1,23 @@
+{
+  "entityId": 43432,
+  "entityType": "Person",
+  "sender": "INTELLIGO",
+  "entityDetails": {
+    "name": [
+      {
+        "full": "Bradley Friedman",
+        "confidence": 0.9
+      },
+      {
+        "full": "Brad Friedman",
+        "confidence": 0.6
+      }
+    ],
+    "address": [
+      {
+        "full": "123 Ocean Drive, Miami, FL 33139",
+        "confidence": 0.95
+      }
+    ]
+  }
+}
