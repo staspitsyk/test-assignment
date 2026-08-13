@@ -3,11 +3,13 @@ import { QueryPlanner, PlannerResult } from 'src/legal-results/query-planner/que
 import { EntityInput } from 'src/entities/entity-input';
 import { InvalidEntityException } from 'src/shared/errors/domain.errors';
 import { AppConfig } from 'src/config/config.token';
+import { MetricsService } from 'src/shared/observability/metrics.service';
 
 describe('FanoutService Unit Tests', () => {
   let fanoutService: FanoutService;
   let mockQueryPlanner: jest.Mocked<QueryPlanner>;
   let mockConfig: AppConfig;
+  let mockMetrics: Partial<MetricsService>;
 
   beforeEach(() => {
     mockQueryPlanner = {
@@ -18,7 +20,11 @@ describe('FanoutService Unit Tests', () => {
       ALIAS_CONFIDENCE_THRESHOLD: 0.5,
     } as AppConfig;
 
-    fanoutService = new FanoutService(mockConfig, mockQueryPlanner);
+    mockMetrics = {
+      aliasFanoutHistogram: { observe: jest.fn() } as unknown as MetricsService['aliasFanoutHistogram'],
+    };
+
+    fanoutService = new FanoutService(mockConfig, mockQueryPlanner, mockMetrics as MetricsService);
   });
 
   it('should throw InvalidEntityException if all candidates are below threshold', async () => {

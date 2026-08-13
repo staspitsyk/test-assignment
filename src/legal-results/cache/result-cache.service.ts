@@ -1,15 +1,22 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { createCache, Cache } from 'async-cache-dedupe';
+import { ClsService } from 'nestjs-cls';
 import { APP_CONFIG, AppConfig } from '../../config/config.token';
 import { RedisService } from '../../shared/redis/redis.service';
 import { MetricsService } from '../../shared/observability/metrics.service';
 import { EntityInput } from '../../entities/entity-input';
 import { FanoutService, FanoutResponse } from '../alias-fanout/fanout.service';
 
+export type CacheStatus = 'hit' | 'miss' | 'stale' | 'bypass';
+
+// CLS key used to carry per-request cache status from the async-cache-dedupe
+// callbacks back to the calling handler without a shared mutable instance field.
+const CLS_CACHE_STATUS_KEY = 'legal-results:cache-status';
+
 export interface CachedLegalResults {
   fanoutResponse: FanoutResponse;
-  cacheStatus: 'hit' | 'miss' | 'stale' | 'bypass';
+  cacheStatus: CacheStatus;
 }
 
 export function normalizedEntityHash(entity: EntityInput, threshold = 0.5): string {
@@ -56,17 +63,23 @@ export function normalizedEntityHash(entity: EntityInput, threshold = 0.5): stri
   return `legal:results:${hash}`;
 }
 
+// Typed shim over the dynamic async-cache-dedupe API — replaces the previous `as any`
+// cast at the call site with a single, localized cast that documents the shape.
+interface LegalResultsCache extends Cache {
+  getLegalResults(entity: EntityInput): Promise<FanoutResponse>;
+}
+
 @Injectable()
 export class ResultCacheService {
   private readonly logger = new Logger(ResultCacheService.name);
-  private readonly dedupeCache: Cache;
-  private currentCacheStatus: 'hit' | 'miss' | 'stale' = 'miss';
+  private readonly dedupeCache: LegalResultsCache;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly redisService: RedisService,
     private readonly metricsService: MetricsService,
     private readonly fanoutService: FanoutService,
+    private readonly cls: ClsService,
   ) {
     const threshold = this.config.ALIAS_CONFIDENCE_THRESHOLD ?? 0.5;
     const ttlSeconds = this.config.CACHE_TTL_SECONDS ?? 1800;
@@ -74,7 +87,7 @@ export class ResultCacheService {
 
     const isTest = this.config.NODE_ENV === 'test';
 
-    this.dedupeCache = createCache({
+    const cache = createCache({
       storage: isTest
         ? { type: 'memory' }
         : {
@@ -84,11 +97,11 @@ export class ResultCacheService {
             },
           },
       onHit: (key: string) => {
-        this.currentCacheStatus = 'hit';
+        this.setStatus('hit');
         this.logger.debug({ event: 'cache_hit', key });
       },
       onMiss: (key: string) => {
-        this.currentCacheStatus = 'miss';
+        this.setStatus('miss');
         this.logger.debug({ event: 'cache_miss', key });
       },
       onDedupe: (key: string) => {
@@ -97,30 +110,30 @@ export class ResultCacheService {
       },
     });
 
-    this.dedupeCache.define(
+    cache.define(
       'getLegalResults',
       {
-        serialize: (args: any) => {
+        serialize: (args: unknown): string => {
           const entity = Array.isArray(args) ? args[0] : args;
           if (typeof entity === 'string') {
             return entity;
           }
-          return normalizedEntityHash(entity, threshold);
+          return normalizedEntityHash(entity as EntityInput, threshold);
         },
-        ttl: (result: FanoutResponse) => {
+        ttl: (result: FanoutResponse): number => {
           if (result && result.meta && result.meta.unnarrowable) {
             return 60; // Short 60s TTL for negative / unnarrowable results
           }
           return ttlSeconds;
         },
-        stale: (result: FanoutResponse) => {
-          return staleSeconds;
-        },
+        stale: (_result: FanoutResponse): number => staleSeconds,
       },
       async (entity: EntityInput): Promise<FanoutResponse> => {
         return this.fanoutService.execute(entity);
       },
     );
+
+    this.dedupeCache = cache as LegalResultsCache;
   }
 
   public async getLegalResults(
@@ -140,7 +153,7 @@ export class ResultCacheService {
       const ttl = freshResponse.meta.unnarrowable ? 60 : (this.config.CACHE_TTL_SECONDS ?? 1800);
       this.dedupeCache
         .set('getLegalResults', hashKey, freshResponse, ttl)
-        .catch((err) => {
+        .catch((err: Error) => {
           this.logger.warn({ event: 'cache_bypass_update_failed', error: err.message });
         });
 
@@ -150,9 +163,10 @@ export class ResultCacheService {
       };
     }
 
-    this.currentCacheStatus = 'miss';
-    const fanoutResponse = await (this.dedupeCache as any).getLegalResults(entity);
-    const cacheStatus = this.currentCacheStatus;
+    // Seed the per-request status; onHit/onMiss will overwrite via CLS.
+    this.setStatus('miss');
+    const fanoutResponse = await this.dedupeCache.getLegalResults(entity);
+    const cacheStatus = this.getStatus() ?? 'miss';
 
     this.metricsService.cacheHitsCounter.inc({ result: cacheStatus });
 
@@ -160,5 +174,18 @@ export class ResultCacheService {
       fanoutResponse,
       cacheStatus,
     };
+  }
+
+  private setStatus(status: CacheStatus): void {
+    // Guard against callbacks firing outside a CLS context (e.g. during warm-up); in that
+    // case the caller falls back to 'miss', which is the least-misleading default.
+    if (this.cls.isActive()) {
+      this.cls.set(CLS_CACHE_STATUS_KEY, status);
+    }
+  }
+
+  private getStatus(): CacheStatus | undefined {
+    if (!this.cls.isActive()) return undefined;
+    return this.cls.get<CacheStatus>(CLS_CACHE_STATUS_KEY);
   }
 }

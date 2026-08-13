@@ -1,15 +1,17 @@
+// IMPORTANT: OTel bootstrap must run before any of the modules we want auto-instrumentation
+// to patch (undici / ioredis / pino / http / express). Keeping this as the very first import
+// ensures the NodeSDK.start() side-effect fires before those libraries are required.
+import './shared/observability/otel';
+
 import { NestFactory } from '@nestjs/core';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { AppModule } from './app.module';
 import { APP_CONFIG, AppConfig } from './config/config.token';
-import { bootstrapOtel } from './shared/observability/otel';
 import { ReadinessStateService } from './shared/health/health.controller';
 
 async function bootstrap(): Promise<void> {
-  bootstrapOtel();
-
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
 
   const config = app.get<AppConfig>(APP_CONFIG);

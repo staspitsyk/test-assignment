@@ -15,6 +15,7 @@ import {
   UpstreamRateLimitedException,
   UpstreamUnavailableException,
 } from 'src/shared/errors/domain.errors';
+import { MetricsService } from 'src/shared/observability/metrics.service';
 
 function isRetryableError(err: unknown): boolean {
   if (
@@ -44,7 +45,7 @@ export class DocketAlarmPolicy {
   private readonly logger = new Logger(DocketAlarmPolicy.name);
   private readonly policyPipeline: IPolicy;
 
-  constructor() {
+  constructor(private readonly metrics: MetricsService) {
     const timeoutPolicy = timeout(20_000, TimeoutStrategy.Aggressive);
 
     const retryPolicy = retry(
@@ -66,12 +67,15 @@ export class DocketAlarmPolicy {
     );
 
     cbPolicy.onBreak(() => {
+      this.metrics.circuitStateGauge.set({ name: 'docket_alarm' }, 2);
       this.logger.warn({ event: 'da_circuit_breaker_open' });
     });
     cbPolicy.onReset(() => {
+      this.metrics.circuitStateGauge.set({ name: 'docket_alarm' }, 0);
       this.logger.log({ event: 'da_circuit_breaker_closed' });
     });
     cbPolicy.onHalfOpen(() => {
+      this.metrics.circuitStateGauge.set({ name: 'docket_alarm' }, 1);
       this.logger.log({ event: 'da_circuit_breaker_half_open' });
     });
 

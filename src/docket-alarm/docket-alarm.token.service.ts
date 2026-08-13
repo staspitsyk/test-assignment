@@ -4,8 +4,11 @@ import { Dispatcher } from 'undici';
 import { APP_CONFIG, AppConfig } from 'src/config/config.token';
 import { RedisService } from 'src/shared/redis/redis.service';
 import { UpstreamAuthFailedException } from 'src/shared/errors/domain.errors';
+import { MetricsService } from 'src/shared/observability/metrics.service';
 import { UNDICI_DISPATCHER } from './docket-alarm.http';
 import { DaLoginResponse } from './docket-alarm.types';
+import { DocketAlarmLimiter } from './docket-alarm.limiter';
+import { DocketAlarmPolicy } from './docket-alarm.policy';
 
 export interface CachedTokenData {
   token: string;
@@ -16,15 +19,31 @@ export interface CachedTokenData {
 export class TokenService implements OnModuleInit {
   private readonly logger = new Logger(TokenService.name);
 
+  // Notifies in-process waiters when a fresh token lands in Redis via pub/sub.
+  private tokenWaiters: Array<() => void> = [];
+
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(UNDICI_DISPATCHER) private readonly dispatcher: Dispatcher,
     private readonly redisService: RedisService,
+    private readonly limiter: DocketAlarmLimiter,
+    private readonly policy: DocketAlarmPolicy,
+    private readonly metrics: MetricsService,
   ) {}
 
   public async onModuleInit(): Promise<void> {
     await this.redisService.subscribe('da:token:new', (_channel, message) => {
       this.logger.debug({ event: 'da_token_pubsub_received', messageLength: message.length });
+      // Wake any waiters — they will re-read Redis and pick up the fresh token.
+      const waiters = this.tokenWaiters;
+      this.tokenWaiters = [];
+      for (const resolve of waiters) {
+        try {
+          resolve();
+        } catch {
+          // resolver already invoked; ignore
+        }
+      }
     });
   }
 
@@ -35,19 +54,25 @@ export class TokenService implements OnModuleInit {
     if (cached && cached.token && cached.expiresAt) {
       const remainingMs = cached.expiresAt - now;
 
-      // Pre-expiry window: 10 minutes (600,000 ms)
-      if (remainingMs > 600_000) {
+      // Pre-expiry window: 10 minutes (600,000 ms) — full TTL.
+      const warmMs = 600_000;
+      if (remainingMs > warmMs) {
         return cached.token;
       }
 
       if (remainingMs > 0) {
-        // Probabilistic warm pre-expiry refresh
-        this.refreshToken().catch((err: Error) => {
-          this.logger.warn({
-            event: 'background_token_refresh_failed',
-            error: err.message,
+        // Probabilistic pre-expiry refresh — smears attempts across the fleet.
+        // p = (age_in_warm_window) / warmMs; grows from ~0 at start of window to ~1 near expiry.
+        const ageInWarm = warmMs - remainingMs;
+        const p = ageInWarm / warmMs;
+        if (Math.random() < p) {
+          this.refreshToken().catch((err: Error) => {
+            this.logger.warn({
+              event: 'background_token_refresh_failed',
+              error: err.message,
+            });
           });
-        });
+        }
         return cached.token;
       }
     }
@@ -62,19 +87,27 @@ export class TokenService implements OnModuleInit {
     const acquired = await redisClient.set('da:token:refresh', lockId, 'PX', 30_000, 'NX');
 
     if (!acquired) {
+      this.metrics.tokenRefreshCounter.inc({ result: 'waited' });
       return this.waitForToken();
     }
 
     try {
-      const loginToken = await this.executeLogin();
+      // Login goes through its own limiter (1/60s) and the shared policy (retry+timeout+breaker).
+      const loginToken = await this.limiter.scheduleLogin(() =>
+        this.policy.execute(() => this.executeLogin()),
+      );
       const expiresAt = Date.now() + 90 * 60 * 1000;
       const tokenData: CachedTokenData = { token: loginToken, expiresAt };
 
       await this.redisService.setJson('da:token', tokenData, 5400);
       await this.redisService.publish('da:token:new', loginToken);
 
+      this.metrics.tokenRefreshCounter.inc({ result: 'won_lock' });
       this.logger.log({ event: 'da_token_refreshed', expiresAt });
       return loginToken;
+    } catch (err) {
+      this.metrics.tokenRefreshCounter.inc({ result: 'failed' });
+      throw err;
     } finally {
       const currentLock = await redisClient.get('da:token:refresh');
       if (currentLock === lockId) {
@@ -91,7 +124,14 @@ export class TokenService implements OnModuleInit {
   private async waitForToken(maxWaitMs = 5000): Promise<string> {
     const startTime = Date.now();
     while (Date.now() - startTime < maxWaitMs) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Wait for pub/sub notification OR a 500ms poll fallback (in case pub/sub misses).
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 500);
+        this.tokenWaiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
       const cached = await this.redisService.getJson<CachedTokenData>('da:token');
       if (cached && cached.token && cached.expiresAt > Date.now()) {
         return cached.token;

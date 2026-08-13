@@ -3,10 +3,16 @@ import { APP_CONFIG, AppConfig } from '../../config/config.token';
 import { EntityInput } from '../../entities/entity-input';
 import { LegalResult } from '../../entities/legal-result';
 import { InvalidEntityException } from '../../shared/errors/domain.errors';
-import { QueryPlanner } from '../query-planner/query-planner';
+import { MetricsService } from '../../shared/observability/metrics.service';
+import { QueryPlanner, CallBudget } from '../query-planner/query-planner';
 import { parseStateCodes } from '../query-planner/address-parser';
 import { dedupResults } from './dedup';
 import { sortLegalResults } from '../sort/sort';
+
+// Hard upper bound on DA upstream calls per incoming request. Prevents a single
+// pathological input (many aliases × many pages × many ladder steps) from burning
+// down the shared rate-limiter reservoir on behalf of one caller.
+const PER_REQUEST_CALL_BUDGET = 30;
 
 export interface FanoutResponse {
   results: LegalResult[];
@@ -46,6 +52,7 @@ export class FanoutService {
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     private readonly queryPlanner: QueryPlanner,
+    private readonly metrics: MetricsService,
   ) {}
 
   public async execute(entity: EntityInput): Promise<FanoutResponse> {
@@ -65,17 +72,23 @@ export class FanoutService {
     // Parse state codes from addresses (if any)
     const stateCodes = parseStateCodes(entity.addressCandidates);
 
+    this.metrics.aliasFanoutHistogram.observe(validCandidates.length);
+
     this.logger.debug({
       event: 'fanout_start',
       candidatesCount: validCandidates.length,
       stateCodes,
     });
 
+    // Shared per-request budget: at most PER_REQUEST_CALL_BUDGET upstream DA calls
+    // across ALL candidates. Each candidate's planner cooperatively spends from it.
+    const budget = new CallBudget(PER_REQUEST_CALL_BUDGET);
+
     // Run query planner for candidate aliases concurrently (concurrency 3)
     const plannerYields = await pMap(
       validCandidates,
       (candidate) =>
-        this.queryPlanner.planAndSearch(candidate, entity.entityType, stateCodes),
+        this.queryPlanner.planAndSearch(candidate, entity.entityType, stateCodes, budget),
       3,
     );
 
@@ -101,10 +114,20 @@ export class FanoutService {
     // Sort results by court tier authority -> filing date desc -> tiebreaker
     const sorted = sortLegalResults(deduped);
 
-    // Enforce max 250 cap on merged results
-    const isMergedTruncated = sorted.length > 250 || anyTruncated;
-    const isMergedPartial = sorted.length > 250 || anyPartial;
+    // Enforce max 250 cap on merged results.
+    // `truncated` means "returned < what upstream held". `partial` means "narrowing was exhausted
+    // and we still had > 250" (or the budget ran out mid-flight). Keep them distinct.
+    const mergedOverCap = sorted.length > 250;
+    const isMergedTruncated = mergedOverCap || anyTruncated;
+    const isMergedPartial = anyPartial;
     const finalResults = sorted.slice(0, 250);
+
+    if (budget.leftover() === 0) {
+      this.logger.warn({
+        event: 'fanout_budget_fully_spent',
+        candidates: validCandidates.length,
+      });
+    }
 
     return {
       results: finalResults,

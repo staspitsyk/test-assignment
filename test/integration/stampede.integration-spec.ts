@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { MockAgent } from 'undici';
+import { ClsModule } from 'nestjs-cls';
 import { APP_CONFIG, AppConfig } from 'src/config/config.token';
 import { RedisService } from 'src/shared/redis/redis.service';
 import { UNDICI_DISPATCHER } from 'src/docket-alarm/docket-alarm.http';
@@ -67,6 +68,7 @@ describe('Stampede Integration Test', () => {
     };
 
     moduleRef = await Test.createTestingModule({
+      imports: [ClsModule.forRoot({ global: true })],
       providers: [
         TokenService,
         DocketAlarmLimiter,

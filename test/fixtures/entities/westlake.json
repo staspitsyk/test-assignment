@@ -6,10 +6,15 @@
     "name": [
       {
         "full": "Westlake Services",
-        "confidence": 1.0,
-        "type": "LLC"
+        "type": "LLC",
+        "confidence": 1
       }
     ],
-    "address": []
+    "address": [
+      {
+        "full": "4751 Wilshire Blvd. Suite 100. Los Angeles, CA 90010",
+        "confidence": 1
+      }
+    ]
   }
 }

@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Dispatcher } from 'undici';
 import { APP_CONFIG, AppConfig } from 'src/config/config.token';
+import { MetricsService } from 'src/shared/observability/metrics.service';
+import { UpstreamAuthFailedException } from 'src/shared/errors/domain.errors';
 import { UNDICI_DISPATCHER } from './docket-alarm.http';
 import { TokenService } from './docket-alarm.token.service';
 import { DocketAlarmLimiter } from './docket-alarm.limiter';
@@ -18,6 +20,7 @@ export class DocketAlarmClient {
     private readonly tokenService: TokenService,
     private readonly limiter: DocketAlarmLimiter,
     private readonly policy: DocketAlarmPolicy,
+    private readonly metrics: MetricsService,
   ) {}
 
   public async search(
@@ -26,7 +29,7 @@ export class DocketAlarmClient {
     offset = 0,
   ): Promise<DaSearchResponse> {
     return this.limiter.scheduleSearch(() =>
-      this.policy.execute(() => this.executeSearch(query, limit, offset)),
+      this.policy.execute(() => this.executeSearch(query, limit, offset, false)),
     );
   }
 
@@ -34,6 +37,7 @@ export class DocketAlarmClient {
     query: string,
     limit: number,
     offset: number,
+    isRetryAfter401: boolean,
   ): Promise<DaSearchResponse> {
     const token = await this.tokenService.getToken();
 
@@ -53,6 +57,8 @@ export class DocketAlarmClient {
     }
 
     const path = `${searchBasePath}?${params.toString()}`;
+    const startTime = Date.now();
+    let statusForMetric = 'error';
 
     try {
       const response = await this.dispatcher.request({
@@ -66,9 +72,16 @@ export class DocketAlarmClient {
       });
 
       const rawText = await response.body.text();
+      statusForMetric = String(response.statusCode);
 
       if (response.statusCode === 401) {
         await this.tokenService.invalidateToken();
+        // One-shot retry with a freshly-fetched token. If the second call also 401s,
+        // fall through to the exception below.
+        if (!isRetryAfter401) {
+          this.logger.warn({ event: 'da_401_retry_with_fresh_token' });
+          return this.executeSearch(query, limit, offset, true);
+        }
         throw mapDocketAlarmError(401, rawText || 'Unauthorized token', this.logger);
       }
 
@@ -105,6 +118,9 @@ export class DocketAlarmClient {
         success: resData.success ?? true,
       };
     } catch (err: unknown) {
+      if (err instanceof UpstreamAuthFailedException) {
+        throw err;
+      }
       if (
         typeof err === 'object' &&
         err !== null &&
@@ -115,6 +131,16 @@ export class DocketAlarmClient {
       }
       const errorMsg = err instanceof Error ? err.message : String(err);
       throw mapDocketAlarmError(500, errorMsg, this.logger);
+    } finally {
+      const elapsedSeconds = (Date.now() - startTime) / 1000;
+      this.metrics.upstreamDurationHistogram.observe(
+        { endpoint: 'search', status: statusForMetric },
+        elapsedSeconds,
+      );
+      this.metrics.upstreamStatusCounter.inc({
+        endpoint: 'search',
+        status: statusForMetric,
+      });
     }
   }
 

@@ -6,7 +6,7 @@
     "name": [
       {
         "full": "Christopher Brien",
-        "confidence": 1.0
+        "confidence": 1
       },
       {
         "full": "Chris Brien",
@@ -19,8 +19,8 @@
     ],
     "address": [
       {
-        "full": "5th Avenue, New York, NY 10001",
-        "confidence": 0.9
+        "full": "New York",
+        "confidence": 1
       }
     ]
   }

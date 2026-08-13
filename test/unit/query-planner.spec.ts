@@ -1,17 +1,23 @@
 import { QueryPlanner } from 'src/legal-results/query-planner/query-planner';
 import { DocketAlarmClient } from 'src/docket-alarm/docket-alarm.client';
 import { NameCandidate } from 'src/entities/name-candidate';
+import { MetricsService } from 'src/shared/observability/metrics.service';
 
 describe('QueryPlanner Unit Tests', () => {
   let queryPlanner: QueryPlanner;
   let mockDaClient: jest.Mocked<DocketAlarmClient>;
+  let mockMetrics: Partial<MetricsService>;
 
   beforeEach(() => {
     mockDaClient = {
       search: jest.fn(),
     } as unknown as jest.Mocked<DocketAlarmClient>;
 
-    queryPlanner = new QueryPlanner(mockDaClient);
+    mockMetrics = {
+      narrowingStepsCounter: { inc: jest.fn() } as unknown as MetricsService['narrowingStepsCounter'],
+    };
+
+    queryPlanner = new QueryPlanner(mockDaClient, mockMetrics as MetricsService);
   });
 
   describe('Person Ladder', () => {

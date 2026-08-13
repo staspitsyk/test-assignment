@@ -28,14 +28,17 @@ export class DocketAlarmLimiter implements OnModuleDestroy {
       maxConcurrent: 8,
     };
 
+    // Production login is a rare event (token TTL is 90 min); 1/60s guards against
+    // login-endpoint spam. In tests we back-to-back login (e.g. one-shot 401 retry
+    // exercised in the integration suite), so the reservoir is loosened there.
     const loginOptions: Bottleneck.ConstructorOptions = {
       id: 'da-login-limiter',
       datastore: isTest ? 'local' : 'ioredis',
       clearDatastores: false,
       clientOptions: isTest ? undefined : this.parseRedisUrl(this.config.REDIS_URL),
-      reservoir: 1,
-      reservoirRefreshInterval: 60_000,
-      reservoirRefreshAmount: 1,
+      reservoir: isTest ? 20 : 1,
+      reservoirRefreshInterval: isTest ? 1_000 : 60_000,
+      reservoirRefreshAmount: isTest ? 20 : 1,
       maxConcurrent: 1,
     };
 

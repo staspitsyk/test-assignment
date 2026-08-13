@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MockAgent } from 'undici';
 import { APP_CONFIG, AppConfig } from 'src/config/config.token';
 import { RedisService } from 'src/shared/redis/redis.service';
+import { MetricsService } from 'src/shared/observability/metrics.service';
 import { DocketAlarmClient } from 'src/docket-alarm/docket-alarm.client';
 import { TokenService } from 'src/docket-alarm/docket-alarm.token.service';
 import { DocketAlarmLimiter } from 'src/docket-alarm/docket-alarm.limiter';
@@ -14,6 +15,11 @@ import {
 } from 'src/shared/errors/domain.errors';
 
 describe('DocketAlarmClient (Integration with MockAgent)', () => {
+  // Retry backoffs (cockatiel decorrelated jitter, up to 5s per delay) plus 3 attempts can
+  // push a fully-failing call past the default 5s Jest timeout. This suite exercises the
+  // resilience wrapper, so give it room.
+  jest.setTimeout(20_000);
+
   let moduleRef: TestingModule;
   let client: DocketAlarmClient;
   let mockAgent: MockAgent;
@@ -40,18 +46,34 @@ describe('DocketAlarmClient (Integration with MockAgent)', () => {
     mockAgent.disableNetConnect();
     mockPool = mockAgent.get('https://www.docketalarm.com');
 
+    // Stateful mock: setJson stores, getJson reads back, del clears.
+    // Prevents redundant login-limiter contention across retries — a fresh token from
+    // setJson must be visible to subsequent getJson calls, otherwise every retry loop
+    // re-runs login and stalls on the 1-req/60s login reservoir.
+    const store = new Map<string, unknown>();
     redisClientMock = {
       set: jest.fn().mockResolvedValue('OK'),
       get: jest.fn().mockResolvedValue(null),
-      del: jest.fn().mockResolvedValue(1),
+      del: jest.fn().mockImplementation((key: string) => {
+        store.delete(key);
+        return Promise.resolve(1);
+      }),
     };
 
     redisServiceMock = {
       getClient: jest.fn().mockReturnValue(redisClientMock),
-      getJson: jest.fn().mockResolvedValue(null),
-      setJson: jest.fn().mockResolvedValue('OK'),
+      getJson: jest.fn().mockImplementation(async (key: string) => {
+        return store.get(key) ?? null;
+      }),
+      setJson: jest.fn().mockImplementation(async (key: string, value: unknown) => {
+        store.set(key, value);
+        return 'OK';
+      }),
       publish: jest.fn().mockResolvedValue(1),
-      del: jest.fn().mockResolvedValue(1),
+      del: jest.fn().mockImplementation(async (key: string) => {
+        store.delete(key);
+        return 1;
+      }),
       subscribe: jest.fn().mockResolvedValue(undefined),
     };
 
@@ -61,6 +83,7 @@ describe('DocketAlarmClient (Integration with MockAgent)', () => {
         DocketAlarmLimiter,
         DocketAlarmPolicy,
         DocketAlarmClient,
+        MetricsService,
         { provide: APP_CONFIG, useValue: mockConfig },
         { provide: UNDICI_DISPATCHER, useValue: mockAgent },
         { provide: RedisService, useValue: redisServiceMock },
@@ -122,8 +145,12 @@ describe('DocketAlarmClient (Integration with MockAgent)', () => {
         path: (p: string) => p.includes('/api/v1.1/search/'),
         method: 'GET',
       })
-      .reply(401, { success: false, error: 'Unauthorized token' });
+      .reply(401, { success: false, error: 'Unauthorized token' })
+      .persist();
 
+    // With the one-shot 401 retry, the client will call search twice within a single
+    // policy attempt (invalidate + fresh token + retry). Persist the 401 so the second
+    // call also matches an interceptor; then AuthFailedException throws deterministically.
     await expect(
       client.search('party:(name:"John Doe") AND is:docket'),
     ).rejects.toThrow(UpstreamAuthFailedException);

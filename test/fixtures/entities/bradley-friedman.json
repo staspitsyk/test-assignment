@@ -9,14 +9,18 @@
         "confidence": 0.9
       },
       {
-        "full": "Brad Friedman",
-        "confidence": 0.6
+        "full": "Brad Gof Friedman",
+        "confidence": 0.8
       }
     ],
     "address": [
       {
-        "full": "123 Ocean Drive, Miami, FL 33139",
-        "confidence": 0.95
+        "full": "1301 Florida Mall Avenue. Orlando, FL 32809",
+        "confidence": 0.8
+      },
+      {
+        "full": "1200 NW 6th AVENUE, MIAMI, FL",
+        "confidence": 0.9
       }
     ]
   }

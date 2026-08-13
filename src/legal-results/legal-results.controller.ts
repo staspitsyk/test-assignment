@@ -1,4 +1,5 @@
 import { Body, Controller, Headers, HttpCode, HttpStatus, Inject, Post } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ClsService } from 'nestjs-cls';
 import { APP_CONFIG, AppConfig } from '../config/config.token';
 import { LegalResultsRequestDto } from './dto/request.dto';
@@ -26,7 +27,7 @@ export class LegalResultsController {
     const requestId =
       requestIdHeader ||
       this.cls.get<string>('requestId') ||
-      `req-${Math.random().toString(36).substring(2, 9)}`;
+      randomUUID();
 
     return this.legalResultsService.getLegalResults(
       body,

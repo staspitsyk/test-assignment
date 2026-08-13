@@ -1,4 +1,13 @@
 services:
+  # NOTE on replicas:
+  # `deploy.replicas` is respected by Docker Swarm, and by `docker compose up --scale app=N`,
+  # but is IGNORED by plain `docker compose up`. To actually run 2 replicas locally, use:
+  #
+  #   docker compose up --build --scale app=2 -d
+  #
+  # Combined with docker-compose.override.yml this maps replica 1 → host :3001 and
+  # replica 2 → host :3002. The plain `docker compose up` command launches a single
+  # instance on the default port.
   app:
     build:
       context: .
@@ -13,6 +22,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -23,6 +33,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
 volumes:
   redis_data:

@@ -3,14 +3,20 @@ import { Dispatcher } from 'undici';
 import { APP_CONFIG, AppConfig } from 'src/config/config.token';
 import { RedisService } from 'src/shared/redis/redis.service';
 import { UpstreamAuthFailedException } from 'src/shared/errors/domain.errors';
+import { MetricsService } from 'src/shared/observability/metrics.service';
 import { TokenService, CachedTokenData } from 'src/docket-alarm/docket-alarm.token.service';
 import { UNDICI_DISPATCHER } from 'src/docket-alarm/docket-alarm.http';
+import { DocketAlarmLimiter } from 'src/docket-alarm/docket-alarm.limiter';
+import { DocketAlarmPolicy } from 'src/docket-alarm/docket-alarm.policy';
 
 describe('TokenService', () => {
   let service: TokenService;
   let redisServiceMock: Partial<RedisService>;
   let dispatcherMock: Partial<Dispatcher>;
   let redisClientMock: { set: jest.Mock; get: jest.Mock; del: jest.Mock };
+  let limiterMock: Partial<DocketAlarmLimiter>;
+  let policyMock: Partial<DocketAlarmPolicy>;
+  let metricsMock: Partial<MetricsService>;
 
   const mockConfig: AppConfig = {
     NODE_ENV: 'test',
@@ -46,12 +52,34 @@ describe('TokenService', () => {
       request: jest.fn(),
     };
 
+    // Pass-through mocks — the token unit tests exercise TokenService logic, not the
+    // resilience stack. The limiter just calls the fn directly, and the policy just executes.
+    limiterMock = {
+      scheduleLogin: jest.fn().mockImplementation(<T>(fn: () => Promise<T>) => fn()),
+      scheduleSearch: jest.fn().mockImplementation(<T>(fn: () => Promise<T>) => fn()),
+    } as Partial<DocketAlarmLimiter>;
+
+    policyMock = {
+      execute: jest
+        .fn()
+        .mockImplementation(<T>(fn: (ctx: { signal: AbortSignal }) => Promise<T>) =>
+          fn({ signal: new AbortController().signal }),
+        ),
+    } as Partial<DocketAlarmPolicy>;
+
+    metricsMock = {
+      tokenRefreshCounter: { inc: jest.fn() } as unknown as MetricsService['tokenRefreshCounter'],
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TokenService,
         { provide: APP_CONFIG, useValue: mockConfig },
         { provide: UNDICI_DISPATCHER, useValue: dispatcherMock },
         { provide: RedisService, useValue: redisServiceMock },
+        { provide: DocketAlarmLimiter, useValue: limiterMock },
+        { provide: DocketAlarmPolicy, useValue: policyMock },
+        { provide: MetricsService, useValue: metricsMock },
       ],
     }).compile();
 
